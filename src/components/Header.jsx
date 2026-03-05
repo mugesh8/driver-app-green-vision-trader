@@ -2,10 +2,35 @@ import { Link } from 'react-router-dom';
 import { Bell, Menu } from 'lucide-react';
 import { USER } from '../constants';
 import { useNotifications } from '../hooks/useNotifications';
+import { useAuth } from '../context/AuthContext';
+
+function getInitials(name) {
+  if (!name) return USER.initials;
+  const parts = String(name).trim().split(/\s+/);
+  const first = parts[0]?.[0] ?? '';
+  const last = parts.length > 1 ? parts[parts.length - 1][0] : '';
+  const initials = (first + last).toUpperCase();
+  return initials || USER.initials;
+}
 
 export default function Header({ onMenuClick }) {
   const { notifications } = useNotifications();
+  const { user } = useAuth();
   const unreadCount = notifications.filter(n => !n.is_read).length;
+
+  const displayName =
+    user?.driver_name ||
+    user?.name ||
+    user?.fullName ||
+    USER.name;
+
+  const displayDriverId =
+    user?.driver_id ||
+    user?.driverId ||
+    user?.did ||
+    USER.driverId;
+
+  const displayInitials = getInitials(displayName);
 
   return (
     <div className="px-4 py-3 bg-[#1A1A1A]">
@@ -21,16 +46,16 @@ export default function Header({ onMenuClick }) {
           </button>
           <div className="w-11 h-11 rounded-full bg-[#D9D9D9] flex items-center justify-center flex-shrink-0">
             <span className="text-[#34C759] font-bold text-base">
-              {USER.initials}
+              {displayInitials}
             </span>
           </div>
           <div>
             <p className="text-white text-sm">Hello 👋</p>
-            <p className="text-white font-bold text-base">{USER.name}</p>
+            <p className="text-white font-bold text-base">{displayName}</p>
             <div className="flex items-center gap-1 mt-1">
               <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#333333]">
                 <span className="text-[#34C759] text-xs">✓</span>
-                <span className="text-[#A0A0A0] text-xs">{USER.driverId}</span>
+                <span className="text-[#A0A0A0] text-xs">{displayDriverId}</span>
               </div>
             </div>
           </div>

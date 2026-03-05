@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { Truck, Mail, Lock, Eye, EyeOff } from 'lucide-react';
+import { Mail, Lock, Eye, EyeOff } from 'lucide-react';
 import Input from '../components/Input';
+import logo from '../assets/logo.png';
 import Button from '../components/Button';
 import { useAuth } from '../context/AuthContext';
 import { ROUTES } from '../constants';
@@ -46,7 +47,11 @@ export default function Login() {
 
   return (
     <div className="min-h-screen bg-[#1A1A1A] flex flex-col items-center px-6 pt-24">
-      <Truck className="w-[75px] h-12 text-[#34C759] mb-9" strokeWidth={2} />
+      <img
+        src={logo}
+        alt="Green Vision Trader"
+        className="h-16 w-auto object-contain mb-9"
+      />
       <h1 className="text-white text-3xl font-bold text-center mb-11">
         Driver Login
       </h1>

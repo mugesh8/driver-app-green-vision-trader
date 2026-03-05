@@ -36,7 +36,6 @@ export default function RouteInformation() {
               <Phone className="w-4 h-4 text-[#27C97F]" strokeWidth={2} />
               <span>+91 98765 12345</span>
             </div>
-            <p className="text-[#27C97F] text-sm mt-2">12.5 km • 25 mins</p>
 
             <p className="text-[#27C97F] text-xs font-semibold uppercase mt-6 mb-2">
               DELIVER

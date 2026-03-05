@@ -8,14 +8,36 @@ import {
   Wallet,
   User,
   MessageSquare,
-  Settings,
   LogOut,
 } from 'lucide-react';
 import { USER } from '../constants';
 
+function getInitials(name) {
+  if (!name) return USER.initials;
+  const parts = String(name).trim().split(/\s+/);
+  const first = parts[0]?.[0] ?? '';
+  const last = parts.length > 1 ? parts[parts.length - 1][0] : '';
+  const initials = (first + last).toUpperCase();
+  return initials || USER.initials;
+}
+
 export default function Drawer({ isOpen, onClose }) {
   const navigate = useNavigate();
-  const { logout } = useAuth();
+  const { user, logout } = useAuth();
+
+  const displayName =
+    user?.driver_name ||
+    user?.name ||
+    user?.fullName ||
+    USER.name;
+
+  const displayDriverId =
+    user?.driver_id ||
+    user?.driverId ||
+    user?.did ||
+    USER.driverId;
+
+  const displayInitials = getInitials(displayName);
 
   if (!isOpen) return null;
 
@@ -36,7 +58,6 @@ export default function Drawer({ isOpen, onClose }) {
 
   const secondaryItems = [
     { path: '/remarks', icon: MessageSquare, label: 'Remarks' },
-    { path: '/settings', icon: Settings, label: 'Settings' },
   ];
 
   return (
@@ -53,14 +74,14 @@ export default function Drawer({ isOpen, onClose }) {
         <div className="p-6 flex flex-col items-center pt-12 flex-1">
           <div className="w-20 h-20 rounded-full bg-white flex items-center justify-center mb-4">
             <span className="text-[#34C759] font-bold text-xl">
-              {USER.initials}
+              {displayInitials}
             </span>
           </div>
           <h2 className="text-white font-bold text-lg text-center mb-1">
-            {USER.name}
+            {displayName}
           </h2>
           <p className="text-white text-sm text-center mb-4">
-            ID: {USER.driverId}
+            ID: {displayDriverId}
           </p>
           <div className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#34C759] mb-8">
             <span className="w-2 h-2 rounded-full bg-white" />

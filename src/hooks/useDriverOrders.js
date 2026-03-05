@@ -4,8 +4,125 @@ import { get } from '../api/client';
 
 function getDriverId(user) {
   if (!user) return null;
-  const id = user.did ?? user.data?.did ?? user.id ?? user.driver_id ?? user.driverId ?? user._id;
-  return id;
+
+  // For order assignments, the backend and admin panel usually refer to
+  // drivers using the string code (e.g. "DRV-260116-0002"). Prefer that
+  // code for matching, but fall back to the internal numeric `did` if
+  // needed so older data still works.
+  const codeId =
+    user.driver_id ??
+    user.driverId ??
+    user.data?.driver_id ??
+    user.data?.driverId;
+
+  const numericId =
+    user.did ??
+    user.data?.did ??
+    user.id ??
+    user._id;
+
+  return codeId || numericId || null;
+}
+
+function extractKgQty(item) {
+  if (!item || typeof item !== 'object') return 0;
+
+  // Prefer explicit fields if present
+  const explicitKeys = [
+    'quantity',
+    'qty',
+    'kg',
+    'weight',
+    'netWeight',
+    'grossWeight',
+    'collected_qty',
+    'collectedQty',
+    'quantity_kg',
+    'qty_kg',
+    'pickedQuantity',
+    'revisedPicked',
+    'packedAmount',
+  ];
+
+  for (const key of explicitKeys) {
+    if (item[key] !== undefined && item[key] !== null && item[key] !== '') {
+      const val = item[key];
+      if (typeof val === 'string') {
+        const match = val.match(/[\d.]+/);
+        if (match) return Number(match[0]) || match[0];
+      }
+      return Number(val) || val;
+    }
+  }
+
+  // Fallback: first numeric field whose name suggests quantity/weight
+  const keys = Object.keys(item);
+  const numericKeys = keys.filter((k) => typeof item[k] === 'number' || typeof item[k] === 'string');
+  const fuzzyKey =
+    numericKeys.find((k) => /qty|quantity|kg|weight|picked|packed/i.test(k)) || numericKeys[0];
+
+  if (!fuzzyKey) return 0;
+  const v = item[fuzzyKey];
+  if (typeof v === 'string') {
+    const match = v.match(/[\d.]+/);
+    if (match) return Number(match[0]) || match[0];
+  }
+  return Number(v) || v;
+}
+
+// Extract a collected quantity for a given product name from a "stage-like" object
+// (stage2_data, stage2_summary_data, stage3_data, etc.)
+function extractQtyFromStage(stageRaw, productName) {
+  if (!stageRaw) return 0;
+
+  let stage;
+  try {
+    stage = typeof stageRaw === 'string' ? JSON.parse(stageRaw) : stageRaw;
+  } catch {
+    return 0;
+  }
+  if (!stage || typeof stage !== 'object') return 0;
+
+  const candidates = [];
+
+  if (Array.isArray(stage.productAssignments)) candidates.push(...stage.productAssignments);
+  if (Array.isArray(stage.stage2Assignments)) candidates.push(...stage.stage2Assignments);
+  if (Array.isArray(stage.products)) candidates.push(...stage.products);
+  if (Array.isArray(stage.labourAssignments)) {
+    stage.labourAssignments.forEach((l) => {
+      if (Array.isArray(l.assignments)) candidates.push(...l.assignments);
+    });
+  }
+  if (Array.isArray(stage.driverAssignments)) {
+    stage.driverAssignments.forEach((d) => {
+      if (Array.isArray(d.assignments)) candidates.push(...d.assignments);
+    });
+  }
+
+  if (candidates.length === 0) return 0;
+
+  const matched =
+    candidates.find((c) => productName && c.product === productName) || candidates[0];
+
+  if (!matched) return 0;
+
+  return extractKgQty(matched);
+}
+
+// For local orders, derive the best available kg:
+// 1) stage2_data / stage2_summary_data / summary_data (packed / picked / quantity / grossWeight)
+// 2) fall back to product_assignments fields
+function deriveLocalQty(localOrder, firstProduct) {
+  const name = firstProduct?.product;
+
+  const s2Qty =
+    extractQtyFromStage(localOrder?.stage2_data, name) ||
+    extractQtyFromStage(localOrder?.stage2_summary_data, name) ||
+    extractQtyFromStage(localOrder?.summary_data, name);
+
+  if (s2Qty && Number(s2Qty) !== 0) return s2Qty;
+
+  return extractKgQty(firstProduct);
 }
 
 export function useDriverOrders() {
@@ -135,16 +252,18 @@ export function useDriverOrders() {
 
                 if (summary?.driverAssignments) {
                   const currentDriverIdStr = String(driverId);
-                  // Find the driver group
+                  // Find the driver group – use STRICT matching so a driver
+                  // only ever sees orders explicitly assigned to them.
                   const dGroup = summary.driverAssignments.find(da => {
                     // Match by various ID fields
                     if (da.driverId && String(da.driverId) === currentDriverIdStr) return true;
                     if (da.did && String(da.did) === currentDriverIdStr) return true;
-                    // Fuzzy match name/string just in case
-                    const dStr = String(da.driver || '');
-                    if (dStr === currentDriverIdStr || dStr.includes(currentDriverIdStr)) return true;
+                    // Match "Name - CODE" style strings by the trailing token only
+                    const dStr = String(da.driver || '').trim();
+                    if (!dStr) return false;
+                    if (dStr === currentDriverIdStr) return true;
                     if (dStr.includes(' - ')) {
-                      const extracted = dStr.split(' - ').pop();
+                      const extracted = dStr.split(' - ').pop().trim();
                       if (extracted === currentDriverIdStr) return true;
                     }
                     return false;
@@ -194,14 +313,16 @@ export function useDriverOrders() {
 
               try {
                 // Verify driver assignment if needed.
-                // Assuming the fetch by ID implies visibility, but we can double check 'driver_id'
+                // If we already matched this driver via summary_data, trust that
+                // match even if driverId formats differ (e.g. code vs numeric).
                 const orderDriverId = finalDriverId;
                 const currentDriverId = driverId;
                 const orderDriverIdStr = String(orderDriverId || '');
                 const currentDriverIdStr = String(currentDriverId || '');
 
-                // Allow if IDs match OR if user is fetching their own list via loop
-                let isMatch = orderDriverIdStr === currentDriverIdStr;
+                // Start with "matched" when summary_data explicitly linked this
+                // local order to the current driver.
+                let isMatch = !!foundInSummary || orderDriverIdStr === currentDriverIdStr;
 
                 // Double check against top level if summary match failed/ambiguous
                 if (!isMatch) {
@@ -209,15 +330,25 @@ export function useDriverOrders() {
                   if (String(topLevelId) === currentDriverIdStr) isMatch = true;
 
                   if (!isMatch && localOrder.driver) {
-                    const driverStr = String(localOrder.driver);
-                    if (driverStr === currentDriverIdStr || driverStr.includes(currentDriverIdStr)) {
+                    const driverStr = String(localOrder.driver).trim();
+                    if (driverStr === currentDriverIdStr) {
                       isMatch = true;
+                    } else if (driverStr.includes(' - ')) {
+                      const extractedId = driverStr.split(' - ').pop().trim();
+                      if (extractedId === currentDriverIdStr) {
+                        isMatch = true;
+                      }
                     }
                   }
                 }
 
-                if (!foundInSummary && !isMatch && orderDriverIdStr) {
-                  console.log(`Local order ${localOrder.local_order_id} driver mismatch. Assigned: ${orderDriverIdStr}, Current: ${currentDriverIdStr}`);
+                // If, after all checks, this order isn't actually assigned to
+                // the current driver, log (once) for debugging and skip it.
+                if (!isMatch) {
+                  if (!foundInSummary && orderDriverIdStr) {
+                    console.log(`Local order ${localOrder.local_order_id} driver mismatch. Assigned: ${orderDriverIdStr}, Current: ${currentDriverIdStr}`);
+                  }
+                  return;
                 }
 
                 let routes = [];
@@ -237,6 +368,8 @@ export function useDriverOrders() {
                 const firstRoute = routes[0] || {};
                 const firstProduct = products[0] || {};
 
+                const localQty = deriveLocalQty(localOrder, firstProduct);
+
                 localListFromLoop.push({
                   id: `${localOrder.local_order_id}-loop`,
                   orderId: localOrder.order?.order_id || localOrder.order_id,
@@ -250,7 +383,7 @@ export function useDriverOrders() {
                   fromDetail: '',
                   toName: 'Warehouse',
                   toDetail: 'Packing Center',
-                  product: firstProduct.product || '-',
+                  product: `${firstProduct.product || '-'} - ${localQty} kg`,
                   phone: firstProduct.phone || '+91 98765 12345',
                 });
               } catch (err) {
@@ -259,11 +392,75 @@ export function useDriverOrders() {
               continue; // Done with local order
             }
 
-            // Parse stage1_summary_data
+            // Parse stage1_summary_data (stage1 = local pickup / warehouse collection)
             if (assignmentData.stage1_summary_data) {
               let stage1Data = typeof assignmentData.stage1_summary_data === 'string'
                 ? JSON.parse(assignmentData.stage1_summary_data)
                 : assignmentData.stage1_summary_data;
+
+              // Build a lookup for collected kg per oiid using later stages (stage2 / stage3),
+              // because stage1 `quantity` can remain 0 even after collection.
+              const collectedByOiid = {};
+
+              try {
+                if (assignmentData.stage2_data) {
+                  const stage2Raw = typeof assignmentData.stage2_data === 'string'
+                    ? JSON.parse(assignmentData.stage2_data)
+                    : assignmentData.stage2_data;
+
+                  const s2Products = stage2Raw?.productAssignments
+                    || stage2Raw?.stage2Assignments
+                    || stage2Raw?.products
+                    || [];
+
+                  s2Products.forEach((p) => {
+                    const key = String(p.oiid ?? p.id ?? '');
+                    if (!key) return;
+                    let q =
+                      p.packedAmount ??
+                      p.revisedPicked ??
+                      p.pickedQuantity ??
+                      p.quantity ??
+                      0;
+                    if ((!q || q === 0) && typeof p.grossWeight === 'string') {
+                      const m = p.grossWeight.match(/[\d.]+/);
+                      if (m) q = Number(m[0]);
+                    }
+                    if (q && Number(q) !== 0) {
+                      collectedByOiid[key] = Number(q) || q;
+                    }
+                  });
+                }
+
+                // Fallback to stage3 data (airport leg) if stage2 doesn't have usable weights
+                if (
+                  Object.keys(collectedByOiid).length === 0 &&
+                  assignmentData.stage3_data
+                ) {
+                  const stage3Raw = typeof assignmentData.stage3_data === 'string'
+                    ? JSON.parse(assignmentData.stage3_data)
+                    : assignmentData.stage3_data;
+
+                  const s3Products = stage3Raw?.products || [];
+                  s3Products.forEach((p) => {
+                    const key = String(p.oiid ?? p.id ?? '');
+                    if (!key) return;
+                    let q = 0;
+                    if (typeof p.grossWeight === 'string') {
+                      const m = p.grossWeight.match(/[\d.]+/);
+                      if (m) q = Number(m[0]);
+                    }
+                    if ((!q || q === 0) && (p.totalWeight || p.weight)) {
+                      q = p.totalWeight || p.weight;
+                    }
+                    if (q && Number(q) !== 0) {
+                      collectedByOiid[key] = Number(q) || q;
+                    }
+                  });
+                }
+              } catch (e) {
+                console.error('Failed to derive collected quantities from later stages', e);
+              }
 
               if (stage1Data?.driverAssignments) {
                 const driverAssignment = stage1Data.driverAssignments.find(da => {
@@ -273,17 +470,24 @@ export function useDriverOrders() {
                   // Check driverId field
                   if (da.driverId && String(da.driverId) === idStr) return true;
                   // Check driver field (name or name - id format)
-                  const driverStr = String(da.driver || '');
+                  const driverStr = String(da.driver || '').trim();
+                  if (!driverStr) return false;
                   if (driverStr === idStr) return true;
                   if (driverStr.includes(' - ')) {
-                    const extractedId = driverStr.split(' - ').pop();
+                    const extractedId = driverStr.split(' - ').pop().trim();
                     if (extractedId === idStr) return true;
                   }
-                  return driverStr.includes(idStr);
+                  return false;
                 });
 
                 if (driverAssignment?.assignments) {
                   driverAssignment.assignments.forEach((assignment, idx) => {
+                    const key = String(assignment.oiid ?? '');
+                    let stage1Qty =
+                      (key && collectedByOiid[key] !== undefined)
+                        ? collectedByOiid[key]
+                        : extractKgQty(assignment);
+
                     stage1List.push({
                       id: `${order.oid}-${idx}`,
                       orderId: order.order_id || order.oid,
@@ -298,7 +502,7 @@ export function useDriverOrders() {
                       fromDetail: '',
                       toName: 'Warehouse',
                       toDetail: 'Packing Center',
-                      product: `${assignment.product || '-'} - ${assignment.quantity || 0} kg`,
+                      product: `${assignment.product || '-'} - ${stage1Qty} kg`,
                       phone: assignment.phone || '+91 98765 12345',
                     });
                   });
@@ -320,13 +524,14 @@ export function useDriverOrders() {
                   // Check driverId field
                   if (da.driverId && String(da.driverId) === idStr) return true;
                   // Check driver field (name or name - id format)
-                  const driverStr = String(da.driver || '');
+                  const driverStr = String(da.driver || '').trim();
+                  if (!driverStr) return false;
                   if (driverStr === idStr) return true;
                   if (driverStr.includes(' - ')) {
-                    const extractedId = driverStr.split(' - ').pop();
+                    const extractedId = driverStr.split(' - ').pop().trim();
                     if (extractedId === idStr) return true;
                   }
-                  return driverStr.includes(idStr);
+                  return false;
                 });
 
                 if (driverAssignment?.assignments) {
@@ -409,14 +614,12 @@ export function useDriverOrders() {
 
             // If no exact match, check if driver string contains ID (handle Name - ID format if applicable)
             if (!isMatch && localOrder.driver) {
-              const driverStr = String(localOrder.driver);
+              const driverStr = String(localOrder.driver).trim();
               if (driverStr === currentDriverIdStr) {
                 isMatch = true;
               } else if (driverStr.includes(' - ')) {
-                const extractedId = driverStr.split(' - ').pop();
+                const extractedId = driverStr.split(' - ').pop().trim();
                 if (extractedId === currentDriverIdStr) isMatch = true;
-              } else if (driverStr.includes(currentDriverIdStr)) {
-                isMatch = true;
               }
             }
 
@@ -444,6 +647,8 @@ export function useDriverOrders() {
             const firstRoute = routes[0] || {};
             const firstProduct = products[0] || {};
 
+            const bulkLocalQty = deriveLocalQty(localOrder, firstProduct);
+
             localList.push({
               id: `${localOrder.local_order_id}-${idx}`,
               orderId: localOrder.order?.order_id || localOrder.order_id,
@@ -457,7 +662,7 @@ export function useDriverOrders() {
               fromDetail: '',
               toName: 'Warehouse',
               toDetail: 'Packing Center',
-              product: firstProduct.product || '-',
+              product: `${firstProduct.product || '-'} - ${bulkLocalQty} kg`,
               phone: firstProduct.phone || '+91 98765 12345',
             });
           } catch (err) {
