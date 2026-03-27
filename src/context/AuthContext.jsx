@@ -26,8 +26,27 @@ export function AuthProvider({ children }) {
 
   const login = async (email, password) => {
     const data = await loginDriver(email, password);
-    const authToken = data.token || data.accessToken || data.access_token;
-    const userData = data.data || data.user || data.driver || data;
+    const payload = data?.data && typeof data.data === 'object' ? data.data : data;
+
+    const authToken =
+      data?.token ||
+      data?.accessToken ||
+      data?.access_token ||
+      payload?.token ||
+      payload?.accessToken ||
+      payload?.access_token ||
+      payload?.jwt ||
+      payload?.authToken;
+
+    const userData =
+      payload?.user ||
+      payload?.driver ||
+      payload?.profile ||
+      payload?.data ||
+      data?.user ||
+      data?.driver ||
+      payload ||
+      data;
 
     if (!authToken) {
       throw new Error(data.message || 'Invalid response from server');

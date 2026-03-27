@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
+import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { Mail, Lock, Eye, EyeOff } from 'lucide-react';
 import Input from '../components/Input';
 import logo from '../assets/logo.png';
@@ -110,6 +110,13 @@ export default function Login() {
       </form>
 
       <div className="w-[150px] h-1 bg-white rounded-full mt-12" />
+
+      <Link
+        to="/privacy-policy"
+        className="text-[#A0A0A0] text-xs mt-4 hover:text-white transition-colors underline underline-offset-2"
+      >
+        Privacy Policy
+      </Link>
     </div>
   );
 }

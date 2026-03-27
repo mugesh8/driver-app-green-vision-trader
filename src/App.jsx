@@ -21,6 +21,7 @@ import AirportOrderViewInfo from './pages/AirportOrderViewInfo';
 import Notifications from './pages/Notifications';
 import Remarks from './pages/Remarks';
 import Settings from './pages/Settings';
+import PrivacyPolicy from './pages/PrivacyPolicy';
 
 function App() {
   return (
@@ -57,6 +58,7 @@ function App() {
                 <Route path="remarks" element={<Remarks />} />
                 <Route path="settings" element={<Settings />} />
               </Route>
+              <Route path="privacy-policy" element={<PrivacyPolicy />} />
               <Route path="*" element={<Navigate to="/login" replace />} />
             </Routes>
           </NotificationProvider>
