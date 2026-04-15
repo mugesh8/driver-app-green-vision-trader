@@ -183,7 +183,13 @@ export function useDriverOrders() {
             } else {
               // Fallback to sequential trial if type is unknown
               try {
-                assignmentResponse = await get(`/order-assignment/${order.oid}`, token, { silent: true });
+                const oid = String(order.oid || '');
+                if (oid.startsWith('ORD-')) {
+                  assignmentResponse = await get(`/local-order/${order.oid}`, token, { silent: true });
+                  isLocal = true;
+                } else {
+                  assignmentResponse = await get(`/order-assignment/${order.oid}`, token, { silent: true });
+                }
               } catch (err) {
                 const errMsg = err.message || (err.data && err.data.message) || '';
 
@@ -348,7 +354,7 @@ export function useDriverOrders() {
                   if (!foundInSummary && orderDriverIdStr) {
                     console.log(`Local order ${localOrder.local_order_id} driver mismatch. Assigned: ${orderDriverIdStr}, Current: ${currentDriverIdStr}`);
                   }
-                  return;
+                  continue;
                 }
 
                 let routes = [];
@@ -517,19 +523,36 @@ export function useDriverOrders() {
                 : assignmentData.stage3_summary_data;
 
               if (stage3Data?.driverAssignments) {
+                const driverKeys = new Set(
+                  [
+                    driverId,
+                    user?.driver_id,
+                    user?.driverId,
+                    user?.did,
+                    user?.id,
+                    user?.data?.driver_id,
+                    user?.data?.driverId,
+                    user?.data?.did,
+                    user?.data?.id,
+                  ]
+                    .filter((v) => v !== undefined && v !== null && String(v).trim() !== '')
+                    .map((v) => String(v).trim())
+                );
+
                 const driverAssignment = stage3Data.driverAssignments.find(da => {
-                  const idStr = String(driverId);
+                  const did = da.did !== undefined && da.did !== null ? String(da.did).trim() : '';
+                  const daDriverId = da.driverId !== undefined && da.driverId !== null ? String(da.driverId).trim() : '';
                   // Check did field
-                  if (da.did && String(da.did) === idStr) return true;
+                  if (did && driverKeys.has(did)) return true;
                   // Check driverId field
-                  if (da.driverId && String(da.driverId) === idStr) return true;
+                  if (daDriverId && driverKeys.has(daDriverId)) return true;
                   // Check driver field (name or name - id format)
                   const driverStr = String(da.driver || '').trim();
                   if (!driverStr) return false;
-                  if (driverStr === idStr) return true;
+                  if (driverKeys.has(driverStr)) return true;
                   if (driverStr.includes(' - ')) {
                     const extractedId = driverStr.split(' - ').pop().trim();
-                    if (extractedId === idStr) return true;
+                    if (driverKeys.has(extractedId)) return true;
                   }
                   return false;
                 });
