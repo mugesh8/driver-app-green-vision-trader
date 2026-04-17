@@ -1,27 +1,22 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { get } from '../api/client';
+import { getDriverOrdersStage1AndStage3 } from '../api/orderAssignment';
 
+/** Match backup project: internal `did` first (assignments often use numeric did). */
 function getDriverId(user) {
   if (!user) return null;
-
-  // For order assignments, the backend and admin panel usually refer to
-  // drivers using the string code (e.g. "DRV-260116-0002"). Prefer that
-  // code for matching, but fall back to the internal numeric `did` if
-  // needed so older data still works.
-  const codeId =
-    user.driver_id ??
-    user.driverId ??
-    user.data?.driver_id ??
-    user.data?.driverId;
-
-  const numericId =
+  return (
     user.did ??
     user.data?.did ??
     user.id ??
-    user._id;
-
-  return codeId || numericId || null;
+    user.driver_id ??
+    user.driverId ??
+    user.data?.driver_id ??
+    user.data?.driverId ??
+    user._id ??
+    null
+  );
 }
 
 function extractKgQty(item) {
@@ -125,6 +120,309 @@ function deriveLocalQty(localOrder, firstProduct) {
   return extractKgQty(firstProduct);
 }
 
+/** Backend often returns `{ data: [...] }` without `success: true`. */
+function normalizeOrderListPayload(res) {
+  if (!res) return [];
+  if (Array.isArray(res)) return res;
+  if (Array.isArray(res.data)) return res.data;
+  if (Array.isArray(res.orders)) return res.orders;
+  if (Array.isArray(res.items)) return res.items;
+  if (Array.isArray(res.assignments)) return res.assignments;
+  if (Array.isArray(res.results)) return res.results;
+  return [];
+}
+
+/** List APIs use oid, order_id, or nested order.order_id — normalize for fetches and keys. */
+function resolveOrderOid(order) {
+  if (!order || typeof order !== 'object') return null;
+  const oid =
+    order.oid ??
+    order.order_id ??
+    order.orderId ??
+    order.orderID ??
+    order?.order?.order_id ??
+    order?.order?.oid;
+  return oid != null && String(oid).trim() !== '' ? oid : null;
+}
+
+function scoreOrderRowRichness(row) {
+  const d = row?.data && typeof row.data === 'object' && !Array.isArray(row.data) ? row.data : row;
+  let n = 0;
+  if (d?.stage1_summary_data) n += 4;
+  if (d?.stage3_summary_data) n += 4;
+  if (d?.stage3_data) n += 3;
+  if (d?.stage2_data) n += 1;
+  if (d?.local_order_id != null) n += 2;
+  return n;
+}
+
+/** Merge rows from /order/list and driver bundle; prefer richer assignment payloads. */
+function mergeOrderRowsByOid(rowsA, rowsB) {
+  const map = new Map();
+  const add = (row) => {
+    const oid = resolveOrderOid(row);
+    if (oid == null) return;
+    const k = String(oid);
+    const prev = map.get(k);
+    if (!prev || scoreOrderRowRichness(row) > scoreOrderRowRichness(prev)) {
+      map.set(k, prev ? { ...prev, ...row } : row);
+    }
+  };
+  rowsA.forEach(add);
+  rowsB.forEach(add);
+  return [...map.values()];
+}
+
+function normalizeLocalOrderListPayload(res) {
+  if (!res) return [];
+  if (Array.isArray(res)) return res;
+  if (Array.isArray(res.data)) return res.data;
+  if (Array.isArray(res.localOrders)) return res.localOrders;
+  return [];
+}
+
+/** Treat assignment payloads whether wrapped in `{ success, data }` or returned raw. */
+function unwrapAssignmentResponse(res) {
+  if (!res) return null;
+  if (res.assignment && typeof res.assignment === 'object') {
+    const inner = unwrapAssignmentResponse(res.assignment);
+    if (inner) return inner;
+  }
+  const d = res.data;
+  if (d != null && typeof d === 'object' && !Array.isArray(d)) {
+    if (
+      d.stage1_summary_data != null ||
+      d.stage3_summary_data != null ||
+      d.stage3_data != null ||
+      d.local_order_id != null ||
+      d.summary_data != null ||
+      d.product_assignments != null
+    ) {
+      return d;
+    }
+  }
+  if (
+    res.stage1_summary_data != null ||
+    res.stage3_summary_data != null ||
+    res.stage3_data != null ||
+    res.local_order_id != null ||
+    res.summary_data != null ||
+    res.product_assignments != null
+  ) {
+    return res;
+  }
+  if (d != null && typeof d === 'object' && !Array.isArray(d)) {
+    return d;
+  }
+  return null;
+}
+
+function keyMatchesSet(keys, raw) {
+  if (raw === undefined || raw === null) return false;
+  const s = String(raw).trim();
+  if (!s) return false;
+  if (keys.has(s)) return true;
+  const n = Number(s);
+  if (!Number.isNaN(n) && Number.isFinite(n) && keys.has(String(n))) return true;
+  for (const k of keys) {
+    if (k === s) return true;
+    const nk = Number(k);
+    const nv = Number(s);
+    if (!Number.isNaN(nk) && !Number.isNaN(nv) && nk === nv) return true;
+  }
+  return false;
+}
+
+/** Collect every driver id variant from the logged-in profile (code, did, numeric id, _id). */
+function expandDriverKeys(user) {
+  const raw = [
+    getDriverId(user),
+    user?.driver_id,
+    user?.driverId,
+    user?.did,
+    user?.id,
+    user?._id,
+    user?.data?.driver_id,
+    user?.data?.driverId,
+    user?.data?.did,
+    user?.data?.id,
+    user?.data?._id,
+  ];
+  const keys = new Set();
+  for (const v of raw) {
+    if (v === undefined || v === null) continue;
+    const s = String(v).trim();
+    if (!s) continue;
+    keys.add(s);
+    const n = Number(s);
+    if (!Number.isNaN(n) && Number.isFinite(n)) keys.add(String(n));
+  }
+  return keys;
+}
+
+function driverDaMatches(keys, da) {
+  if (!da || typeof da !== 'object') return false;
+  const did = da.did !== undefined && da.did !== null ? String(da.did).trim() : '';
+  const daDriverId =
+    da.driverId !== undefined && da.driverId !== null ? String(da.driverId).trim() : '';
+  if (did && keyMatchesSet(keys, did)) return true;
+  if (daDriverId && keyMatchesSet(keys, daDriverId)) return true;
+  const assigned =
+    da.assignedDriverId !== undefined && da.assignedDriverId !== null
+      ? String(da.assignedDriverId).trim()
+      : '';
+  if (assigned && keyMatchesSet(keys, assigned)) return true;
+  const driverStr = String(da.driver || '').trim();
+  if (!driverStr) return false;
+  if (keyMatchesSet(keys, driverStr)) return true;
+  if (driverStr.includes(' - ')) {
+    const extractedId = driverStr.split(' - ').pop().trim();
+    if (keyMatchesSet(keys, extractedId)) return true;
+  }
+  return false;
+}
+
+function parseJsonMaybe(v) {
+  if (v == null) return null;
+  if (typeof v === 'string') {
+    try {
+      return JSON.parse(v);
+    } catch {
+      return null;
+    }
+  }
+  return typeof v === 'object' ? v : null;
+}
+
+function stage3RowHasContent(a) {
+  if (!a || typeof a !== 'object') return false;
+  return (
+    a.oiid != null ||
+    a.product != null ||
+    a.grossWeight != null ||
+    a.entityName != null ||
+    a.airportName != null ||
+    a.destination != null
+  );
+}
+
+/**
+ * Line Airport data often lives in stage3_data.products / airportGroups, not only in
+ * stage3_summary_data.driverAssignments (see AirportOrderViewInfo updates).
+ */
+function appendStage3LineAirportRows({ assignmentData, oid, order, driverKeys, stage3List }) {
+  const stage3Summary = parseJsonMaybe(assignmentData.stage3_summary_data);
+  const stage3Raw = parseJsonMaybe(assignmentData.stage3_data);
+
+  const pushRow = (assignment, idPart, suffix, daFallback, assignmentIndexNum) => {
+    if (!stage3RowHasContent(assignment)) return;
+    const toName =
+      assignment.airportName ||
+      assignment.airport ||
+      assignment.destination ||
+      assignment.toName ||
+      'Airport';
+    const toDetail =
+      assignment.airportLocation ||
+      assignment.location ||
+      assignment.toDetail ||
+      assignment.toAddress ||
+      assignment.address ||
+      '';
+    const ai =
+      typeof assignmentIndexNum === 'number' ? assignmentIndexNum : idPart;
+    stage3List.push({
+      id: `${oid}-${suffix}-${idPart}`,
+      orderId: order.order_id || oid,
+      oid,
+      assignmentIndex: ai,
+      oiid: assignment.oiid ?? assignment.id,
+      driverId: assignment.driverId ?? assignment.did ?? daFallback?.driverId ?? daFallback?.did,
+      status: assignment.status || 'Pending',
+      statusColor: 'bg-[#34C759]',
+      fromName: 'Warehouse',
+      fromAddress: '',
+      fromDetail: 'Packing Center',
+      toName,
+      toDetail,
+      product: assignment.product || assignment.entityName || '-',
+      grossWeight: assignment.grossWeight || 'N/A',
+      noOfPkgs: assignment.noOfPkgs || 0,
+      labour: assignment.labour || 'N/A',
+      ct: assignment.ct || 'N/A',
+    });
+  };
+
+  const consumeDriverAssignments = (stage3Data, tag) => {
+    const list = stage3Data?.driverAssignments;
+    if (!Array.isArray(list)) return;
+    list.forEach((da) => {
+      if (!driverDaMatches(driverKeys, da)) return;
+      const assignments = da.assignments;
+      if (!Array.isArray(assignments)) return;
+      assignments.forEach((assignment, idx) => {
+        pushRow(assignment, idx, `s3da-${tag}`, da, idx);
+      });
+    });
+  };
+
+  const lineMatchesDriver = (assignment, group) => {
+    const lineHas =
+      assignment.driverId != null ||
+      assignment.did != null ||
+      assignment.driver != null ||
+      assignment.assignedDriverId != null ||
+      assignment.driver_id != null;
+    if (lineHas) return driverDaMatches(driverKeys, assignment);
+    if (group && (group.driverId != null || group.did != null || group.driver != null)) {
+      return driverDaMatches(driverKeys, group);
+    }
+    return false;
+  };
+
+  const consumeAirportGroups = (stage3Data, tag) => {
+    const groups = stage3Data?.airportGroups;
+    if (!groups || typeof groups !== 'object') return;
+    Object.values(groups).forEach((group, gIdx) => {
+      const products = group.products || group.assignments || [];
+      if (!Array.isArray(products)) return;
+      products.forEach((assignment, idx) => {
+        if (!lineMatchesDriver(assignment, group)) return;
+        const merged = {
+          ...assignment,
+          airportName: assignment.airportName || group.airportName || group.name,
+          airportLocation: assignment.airportLocation || group.location || group.airportLocation,
+        };
+        pushRow(merged, `${gIdx}-${idx}`, `s3ag-${tag}`, null, idx);
+      });
+    });
+  };
+
+  const consumeProducts = (stage3Data, tag) => {
+    const products = stage3Data?.products;
+    if (!Array.isArray(products)) return;
+    products.forEach((assignment, idx) => {
+      const lineHas =
+        assignment.driverId != null ||
+        assignment.did != null ||
+        assignment.driver != null ||
+        assignment.assignedDriverId != null ||
+        assignment.driver_id != null;
+      if (!lineHas) return;
+      if (!driverDaMatches(driverKeys, assignment)) return;
+      pushRow(assignment, idx, `s3pr-${tag}`, null, idx);
+    });
+  };
+
+  [stage3Summary, stage3Raw].forEach((data, i) => {
+    const tag = i === 0 ? 'sum' : 'raw';
+    if (!data) return;
+    consumeDriverAssignments(data, tag);
+    consumeAirportGroups(data, tag);
+    consumeProducts(data, tag);
+  });
+}
+
 export function useDriverOrders() {
   const { user, token } = useAuth();
   const driverId = getDriverId(user);
@@ -143,11 +441,25 @@ export function useDriverOrders() {
 
     setLoading(true);
     setError(null);
+    const driverKeys = expandDriverKeys(user);
 
     try {
 
-      const ordersResponse = await get('/order/list', token);
-      if (!ordersResponse.success || !ordersResponse.data) {
+      const [ordersResponse, stageBundle] = await Promise.all([
+        get('/order/list', token).catch((e) => {
+          console.warn('/order/list failed:', e);
+          return null;
+        }),
+        getDriverOrdersStage1AndStage3(driverId, token).catch((e) => {
+          console.warn('driver stage1/stage3 bundle failed:', e);
+          return null;
+        }),
+      ]);
+      const orderRows = mergeOrderRowsByOid(
+        normalizeOrderListPayload(ordersResponse),
+        normalizeOrderListPayload(stageBundle)
+      );
+      if (orderRows.length === 0) {
         setStage1Orders([]);
         setStage3Orders([]);
       } else {
@@ -156,8 +468,11 @@ export function useDriverOrders() {
         // Initialize localList here to collect from loop
         const localListFromLoop = [];
 
-        for (const order of ordersResponse.data) {
+        for (const order of orderRows) {
           try {
+            const oid = resolveOrderOid(order);
+            if (oid == null) continue;
+
             let assignmentResponse;
             let isLocal = false;
             let isFlower = false;
@@ -166,48 +481,63 @@ export function useDriverOrders() {
             const isLocalType = order.type === 'local' || order.order_type === 'local';
             const isFlowerType = order.type === 'flower' || order.order_type === 'flower';
 
-            if (isLocalType) {
+            const embedded = unwrapAssignmentResponse(order);
+            const hasEmbeddedAssignment =
+              embedded &&
+              (embedded.stage1_summary_data ||
+                embedded.stage3_summary_data ||
+                embedded.stage3_data ||
+                embedded.summary_data ||
+                embedded.local_order_id != null);
+
+            if (hasEmbeddedAssignment) {
+              assignmentResponse = { data: embedded };
+              if (isLocalType) isLocal = true;
+              else if (isFlowerType) isFlower = true;
+              else if (
+                embedded.local_order_id != null &&
+                embedded.stage1_summary_data == null &&
+                embedded.stage3_summary_data == null &&
+                embedded.stage3_data == null
+              ) {
+                isLocal = true;
+              }
+            } else if (isLocalType) {
               try {
-                assignmentResponse = await get(`/local-order/${order.oid}`, token);
+                assignmentResponse = await get(`/local-order/${oid}`, token);
                 isLocal = true;
               } catch (err) {
-                console.error(`Failed to fetch local assignment for ${order.oid}:`, err);
+                console.error(`Failed to fetch local assignment for ${oid}:`, err);
               }
             } else if (isFlowerType) {
               try {
-                assignmentResponse = await get(`/flower-order-assignment/${order.oid}`, token);
+                assignmentResponse = await get(`/flower-order-assignment/${oid}`, token);
                 isFlower = true;
               } catch (err) {
-                console.error(`Failed to fetch flower assignment for ${order.oid}:`, err);
+                console.error(`Failed to fetch flower assignment for ${oid}:`, err);
               }
             } else {
-              // Fallback to sequential trial if type is unknown
+              // Backup: always try standard order-assignment first (no ORD- shortcut to local)
               try {
-                const oid = String(order.oid || '');
-                if (oid.startsWith('ORD-')) {
-                  assignmentResponse = await get(`/local-order/${order.oid}`, token, { silent: true });
-                  isLocal = true;
-                } else {
-                  assignmentResponse = await get(`/order-assignment/${order.oid}`, token, { silent: true });
-                }
+                assignmentResponse = await get(`/order-assignment/${oid}`, token, { silent: true });
               } catch (err) {
                 const errMsg = err.message || (err.data && err.data.message) || '';
 
                 // If the error explicitly says it's a local/flower order, follow that hint
                 if (errMsg.includes('local order')) {
                   try {
-                    assignmentResponse = await get(`/local-order/${order.oid}`, token);
+                    assignmentResponse = await get(`/local-order/${oid}`, token);
                     isLocal = true;
                   } catch (e) { console.error(e); }
                 } else if (errMsg.includes('flower order')) {
                   try {
-                    assignmentResponse = await get(`/flower-order-assignment/${order.oid}`, token);
+                    assignmentResponse = await get(`/flower-order-assignment/${oid}`, token);
                     isFlower = true;
                   } catch (e) {
                     // It might be local if flower endpoint says so
                     if (e.message?.includes('local order') || e.data?.message?.includes('local order')) {
                       try {
-                        assignmentResponse = await get(`/local-order/${order.oid}`, token);
+                        assignmentResponse = await get(`/local-order/${oid}`, token);
                         isLocal = true;
                       } catch (le) { console.error(le); }
                     } else {
@@ -217,7 +547,7 @@ export function useDriverOrders() {
                 } else {
                   // If regular assignment fails without specific hint, try flower order assignment
                   try {
-                    assignmentResponse = await get(`/flower-order-assignment/${order.oid}`, token, { silent: true });
+                    assignmentResponse = await get(`/flower-order-assignment/${oid}`, token, { silent: true });
                     isFlower = true;
                   } catch (flowerErr) {
                     const flowerErrMsg = flowerErr.message || (flowerErr.data && flowerErr.data.message) || '';
@@ -227,11 +557,11 @@ export function useDriverOrders() {
                     }
 
                     try {
-                      assignmentResponse = await get(`/local-order/${order.oid}`, token, { silent: true });
+                      assignmentResponse = await get(`/local-order/${oid}`, token, { silent: true });
                       isLocal = true;
                     } catch (localErr) {
                       // Silent fail or log if needed, but since we tried everything, maybe log warnings only if relevant
-                      // console.error(`Failed to fetch assignment for ${order.oid}`);
+                      // console.error(`Failed to fetch assignment for ${oid}`);
                       continue;
                     }
                   }
@@ -239,9 +569,29 @@ export function useDriverOrders() {
               }
             }
 
-            if (!assignmentResponse?.success || !assignmentResponse?.data) continue;
+            let assignmentData = unwrapAssignmentResponse(assignmentResponse);
+            if (!assignmentData) continue;
 
-            const assignmentData = assignmentResponse.data;
+            if (
+              !isLocal &&
+              !isFlower &&
+              !assignmentData.stage3_summary_data &&
+              !assignmentData.stage3_data
+            ) {
+              try {
+                const flowerRes = await get(`/flower-order-assignment/${oid}`, token, { silent: true });
+                const fd = unwrapAssignmentResponse(flowerRes);
+                if (fd && (fd.stage3_summary_data || fd.stage3_data)) {
+                  assignmentData = {
+                    ...assignmentData,
+                    stage3_summary_data: fd.stage3_summary_data ?? assignmentData.stage3_summary_data,
+                    stage3_data: fd.stage3_data ?? assignmentData.stage3_data,
+                  };
+                }
+              } catch (e) {
+                /* no flower stage3 for this order */
+              }
+            }
 
             if (isLocal) {
               // Process local order
@@ -249,6 +599,7 @@ export function useDriverOrders() {
               let finalDriverId = localOrder.driver_id || localOrder.driverId || localOrder.did;
               let finalOiid = localOrder.local_order_id;
               let foundInSummary = false;
+              let matchedDriverGroupInSummary = false;
 
               // Try to find exact match in summary_data if available
               if (localOrder.summary_data) {
@@ -257,25 +608,12 @@ export function useDriverOrders() {
                   : localOrder.summary_data;
 
                 if (summary?.driverAssignments) {
-                  const currentDriverIdStr = String(driverId);
-                  // Find the driver group – use STRICT matching so a driver
-                  // only ever sees orders explicitly assigned to them.
-                  const dGroup = summary.driverAssignments.find(da => {
-                    // Match by various ID fields
-                    if (da.driverId && String(da.driverId) === currentDriverIdStr) return true;
-                    if (da.did && String(da.did) === currentDriverIdStr) return true;
-                    // Match "Name - CODE" style strings by the trailing token only
-                    const dStr = String(da.driver || '').trim();
-                    if (!dStr) return false;
-                    if (dStr === currentDriverIdStr) return true;
-                    if (dStr.includes(' - ')) {
-                      const extracted = dStr.split(' - ').pop().trim();
-                      if (extracted === currentDriverIdStr) return true;
-                    }
-                    return false;
-                  });
+                  const dGroup = summary.driverAssignments.find((da) =>
+                    driverDaMatches(driverKeys, da)
+                  );
 
                   if (dGroup) {
+                    matchedDriverGroupInSummary = true;
                     finalDriverId = dGroup.driverId || dGroup.did || finalDriverId;
                     // Find the assignment
                     // Usually local orders in summary have assignments.
@@ -318,42 +656,24 @@ export function useDriverOrders() {
               }
 
               try {
-                // Verify driver assignment if needed.
-                // If we already matched this driver via summary_data, trust that
-                // match even if driverId formats differ (e.g. code vs numeric).
-                const orderDriverId = finalDriverId;
-                const currentDriverId = driverId;
-                const orderDriverIdStr = String(orderDriverId || '');
-                const currentDriverIdStr = String(currentDriverId || '');
-
-                // Start with "matched" when summary_data explicitly linked this
-                // local order to the current driver.
-                let isMatch = !!foundInSummary || orderDriverIdStr === currentDriverIdStr;
-
-                // Double check against top level if summary match failed/ambiguous
+                // Only show local pickups assigned to this driver (strict id / summary group match).
+                let isMatch = matchedDriverGroupInSummary;
                 if (!isMatch) {
-                  const topLevelId = localOrder.driver_id || localOrder.driverId || localOrder.did;
-                  if (String(topLevelId) === currentDriverIdStr) isMatch = true;
-
-                  if (!isMatch && localOrder.driver) {
-                    const driverStr = String(localOrder.driver).trim();
-                    if (driverStr === currentDriverIdStr) {
-                      isMatch = true;
-                    } else if (driverStr.includes(' - ')) {
-                      const extractedId = driverStr.split(' - ').pop().trim();
-                      if (extractedId === currentDriverIdStr) {
-                        isMatch = true;
-                      }
-                    }
+                  isMatch =
+                    keyMatchesSet(driverKeys, localOrder.driver_id) ||
+                    keyMatchesSet(driverKeys, localOrder.driverId) ||
+                    keyMatchesSet(driverKeys, localOrder.did);
+                }
+                if (!isMatch && localOrder.driver) {
+                  const driverStr = String(localOrder.driver).trim();
+                  if (keyMatchesSet(driverKeys, driverStr)) {
+                    isMatch = true;
+                  } else if (driverStr.includes(' - ')) {
+                    const extractedId = driverStr.split(' - ').pop().trim();
+                    if (keyMatchesSet(driverKeys, extractedId)) isMatch = true;
                   }
                 }
-
-                // If, after all checks, this order isn't actually assigned to
-                // the current driver, log (once) for debugging and skip it.
                 if (!isMatch) {
-                  if (!foundInSummary && orderDriverIdStr) {
-                    console.log(`Local order ${localOrder.local_order_id} driver mismatch. Assigned: ${orderDriverIdStr}, Current: ${currentDriverIdStr}`);
-                  }
                   continue;
                 }
 
@@ -469,22 +789,9 @@ export function useDriverOrders() {
               }
 
               if (stage1Data?.driverAssignments) {
-                const driverAssignment = stage1Data.driverAssignments.find(da => {
-                  const idStr = String(driverId);
-                  // Check did field
-                  if (da.did && String(da.did) === idStr) return true;
-                  // Check driverId field
-                  if (da.driverId && String(da.driverId) === idStr) return true;
-                  // Check driver field (name or name - id format)
-                  const driverStr = String(da.driver || '').trim();
-                  if (!driverStr) return false;
-                  if (driverStr === idStr) return true;
-                  if (driverStr.includes(' - ')) {
-                    const extractedId = driverStr.split(' - ').pop().trim();
-                    if (extractedId === idStr) return true;
-                  }
-                  return false;
-                });
+                const driverAssignment = stage1Data.driverAssignments.find((da) =>
+                  driverDaMatches(driverKeys, da)
+                );
 
                 if (driverAssignment?.assignments) {
                   driverAssignment.assignments.forEach((assignment, idx) => {
@@ -495,9 +802,9 @@ export function useDriverOrders() {
                         : extractKgQty(assignment);
 
                     stage1List.push({
-                      id: `${order.oid}-${idx}`,
-                      orderId: order.order_id || order.oid,
-                      oid: order.oid,
+                      id: `${oid}-${idx}`,
+                      orderId: order.order_id || oid,
+                      oid,
                       assignmentIndex: idx,
                       oiid: assignment.oiid,
                       driverId: driverAssignment.driverId,
@@ -516,76 +823,17 @@ export function useDriverOrders() {
               }
             }
 
-            // Parse stage3_summary_data
-            if (assignmentData.stage3_summary_data) {
-              let stage3Data = typeof assignmentData.stage3_summary_data === 'string'
-                ? JSON.parse(assignmentData.stage3_summary_data)
-                : assignmentData.stage3_summary_data;
-
-              if (stage3Data?.driverAssignments) {
-                const driverKeys = new Set(
-                  [
-                    driverId,
-                    user?.driver_id,
-                    user?.driverId,
-                    user?.did,
-                    user?.id,
-                    user?.data?.driver_id,
-                    user?.data?.driverId,
-                    user?.data?.did,
-                    user?.data?.id,
-                  ]
-                    .filter((v) => v !== undefined && v !== null && String(v).trim() !== '')
-                    .map((v) => String(v).trim())
-                );
-
-                const driverAssignment = stage3Data.driverAssignments.find(da => {
-                  const did = da.did !== undefined && da.did !== null ? String(da.did).trim() : '';
-                  const daDriverId = da.driverId !== undefined && da.driverId !== null ? String(da.driverId).trim() : '';
-                  // Check did field
-                  if (did && driverKeys.has(did)) return true;
-                  // Check driverId field
-                  if (daDriverId && driverKeys.has(daDriverId)) return true;
-                  // Check driver field (name or name - id format)
-                  const driverStr = String(da.driver || '').trim();
-                  if (!driverStr) return false;
-                  if (driverKeys.has(driverStr)) return true;
-                  if (driverStr.includes(' - ')) {
-                    const extractedId = driverStr.split(' - ').pop().trim();
-                    if (driverKeys.has(extractedId)) return true;
-                  }
-                  return false;
-                });
-
-                if (driverAssignment?.assignments) {
-                  driverAssignment.assignments.forEach((assignment, idx) => {
-                    if (assignment.airportName && assignment.airportLocation) {
-                      stage3List.push({
-                        id: `${order.oid}-${idx}`,
-                        orderId: order.order_id || order.oid,
-                        oid: order.oid,
-                        assignmentIndex: idx,
-                        oiid: assignment.oiid,
-                        driverId: driverAssignment.did || driverAssignment.driverId,
-                        status: assignment.status || 'Pending',
-                        fromName: 'Warehouse',
-                        fromAddress: '',
-                        fromDetail: 'Packing Center',
-                        toName: assignment.airportName,
-                        toDetail: assignment.airportLocation,
-                        product: assignment.product || '-',
-                        grossWeight: assignment.grossWeight || 'N/A',
-                        noOfPkgs: assignment.noOfPkgs || 0,
-                        labour: assignment.labour || 'N/A',
-                        ct: assignment.ct || 'N/A',
-                      });
-                    }
-                  });
-                }
-              }
+            if (assignmentData.stage3_summary_data || assignmentData.stage3_data) {
+              appendStage3LineAirportRows({
+                assignmentData,
+                oid,
+                order,
+                driverKeys,
+                stage3List,
+              });
             }
           } catch (err) {
-            console.error(`Error processing order ${order.oid}:`, err);
+            console.error(`Error processing order ${resolveOrderOid(order) ?? '?'}:`, err);
           }
         }
 
@@ -604,45 +852,31 @@ export function useDriverOrders() {
       console.error('Error fetching stage orders:', err);
       setStage1Orders([]);
       setStage3Orders([]);
+      setError(err.message || 'Failed to load order list');
     }
 
     // Fetch local orders separately (keep this as backup or for non-assigned access if allowed)
     try {
       const localList = [];
       const localOrdersResponse = await get('/local-order', token);
+      const localData = normalizeLocalOrderListPayload(localOrdersResponse);
 
-      if (localOrdersResponse) {
-        let localData = [];
-        if (Array.isArray(localOrdersResponse)) {
-          localData = localOrdersResponse;
-        } else if (localOrdersResponse && Array.isArray(localOrdersResponse.data)) {
-          localData = localOrdersResponse.data;
-        }
-
+      if (localData.length > 0) {
         console.log('Processing local orders:', localData.length);
 
         localData.forEach((localOrder, idx) => {
           try {
-            // Filter by driverId
-            const currentDriverId = driverId;
-            const currentDriverIdStr = String(currentDriverId || '');
-
-            // Check multiple potential ID fields
             const orderDriverId = localOrder.driver_id || localOrder.driverId || localOrder.did;
-            const orderDriverIdStr = String(orderDriverId || '');
 
-            // Skip if driver IDs don't match
-            // Check exact match
-            let isMatch = orderDriverIdStr === currentDriverIdStr;
+            let isMatch = keyMatchesSet(driverKeys, orderDriverId);
 
-            // If no exact match, check if driver string contains ID (handle Name - ID format if applicable)
             if (!isMatch && localOrder.driver) {
               const driverStr = String(localOrder.driver).trim();
-              if (driverStr === currentDriverIdStr) {
+              if (keyMatchesSet(driverKeys, driverStr)) {
                 isMatch = true;
               } else if (driverStr.includes(' - ')) {
                 const extractedId = driverStr.split(' - ').pop().trim();
-                if (extractedId === currentDriverIdStr) isMatch = true;
+                if (keyMatchesSet(driverKeys, extractedId)) isMatch = true;
               }
             }
 
@@ -650,7 +884,7 @@ export function useDriverOrders() {
               // console.log(`Skipping order ${localOrder.local_order_id}. Assigned: ${orderDriverId}, Current: ${currentDriverId}`);
               return;
             } else {
-              console.log(`Matched order ${localOrder.local_order_id} for driver ${currentDriverId}`);
+              console.log(`Matched order ${localOrder.local_order_id} for driver keys`, [...driverKeys]);
             }
 
             let routes = [];
@@ -707,13 +941,16 @@ export function useDriverOrders() {
         });
         return combined;
       });
+      if (localList.length > 0) {
+        setError(null);
+      }
     } catch (err) {
       console.error('Error fetching local orders:', err);
       // Do NOT clear localOrders if bulk fetch fails, retain what we got from data loop
     } finally {
       setLoading(false);
     }
-  }, [driverId, token]);
+  }, [driverId, token, user]);
 
   useEffect(() => {
     fetchOrders();

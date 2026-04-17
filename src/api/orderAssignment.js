@@ -3,11 +3,14 @@ import { get, put } from './client';
 const BASE = '/order-assignment';
 
 export async function getDriverOrders(driverId, token) {
-  return get(`${BASE}/driver/${driverId}`, token);
+  return get(`${BASE}/driver/${encodeURIComponent(String(driverId))}`, token);
 }
 
 export async function getDriverOrdersStage1AndStage3(driverId, token) {
-  return get(`${BASE}/driver/${driverId}/stage1-and-stage3`, token);
+  return get(
+    `${BASE}/driver/${encodeURIComponent(String(driverId))}/stage1-and-stage3`,
+    token
+  );
 }
 
 export async function getOrderAssignment(orderId, token) {
