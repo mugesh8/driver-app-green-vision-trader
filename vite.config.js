@@ -5,6 +5,8 @@ import { VitePWA } from 'vite-plugin-pwa'
 
 // https://vite.dev/config/
 export default defineConfig({
+  // Relative asset URLs so images/scripts load correctly in the Capacitor WebView (Play Store builds).
+  base: './',
   plugins: [
     react(),
     tailwindcss(),

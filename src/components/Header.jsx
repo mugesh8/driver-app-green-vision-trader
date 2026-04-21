@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom';
 import { Bell, Menu } from 'lucide-react';
+import logo from '../assets/logo.png';
 import { USER } from '../constants';
 import { useNotifications } from '../hooks/useNotifications';
 import { useAuth } from '../context/AuthContext';
@@ -33,9 +34,9 @@ export default function Header({ onMenuClick }) {
   const displayInitials = getInitials(displayName);
 
   return (
-    <div className="px-4 py-3 bg-[#1A1A1A]">
-      <div className="flex items-start justify-between">
-        <div className="flex gap-3 items-center">
+    <header className="px-4 pt-2 pb-3 bg-[#1A1A1A]">
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex gap-2 sm:gap-3 items-center min-w-0">
           <button
             type="button"
             onClick={onMenuClick}
@@ -44,6 +45,11 @@ export default function Header({ onMenuClick }) {
           >
             <Menu className="w-6 h-6" strokeWidth={2} />
           </button>
+          <img
+            src={logo}
+            alt=""
+            className="h-9 w-auto max-w-[100px] object-contain flex-shrink-0"
+          />
           <div className="w-11 h-11 rounded-full bg-[#D9D9D9] flex items-center justify-center flex-shrink-0">
             <span className="text-[#34C759] font-bold text-base">
               {displayInitials}
@@ -71,6 +77,6 @@ export default function Header({ onMenuClick }) {
           )}
         </Link>
       </div>
-    </div>
+    </header>
   );
 }
