@@ -6,14 +6,16 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:cap": "cross-env CAPACITOR_BUILD=1 vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "cap:sync": "npm run build && npx cap sync android",
-    "cap:bundle": "npm run build && npx cap sync android && cd android && .\\gradlew.bat bundleRelease"
+    "cap:sync": "npm run build:cap && npx cap sync android",
+    "cap:bundle": "npm run build:cap && npx cap sync android && cd android && .\\gradlew.bat bundleRelease"
   },
   "dependencies": {
     "@capacitor/android": "^8.1.0",
     "@capacitor/core": "^8.1.0",
+    "@capacitor/status-bar": "^8.0.2",
     "@tailwindcss/vite": "^4.1.18",
     "lucide-react": "^0.564.0",
     "react": "^19.2.0",
@@ -28,6 +30,7 @@
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
+    "cross-env": "^10.1.0",
     "eslint": "^9.39.1",
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",

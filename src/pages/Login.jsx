@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { Mail, Lock, Eye, EyeOff } from 'lucide-react';
 import Input from '../components/Input';
-import logo from '../assets/logo.png';
+import { LOGO_SRC } from '../constants/branding';
 import Button from '../components/Button';
 import { useAuth } from '../context/AuthContext';
 import { ROUTES } from '../constants';
@@ -46,9 +46,9 @@ export default function Login() {
   };
 
   return (
-    <div className="min-h-screen bg-[#1A1A1A] flex flex-col items-center px-6 pt-24">
+    <div className="min-h-screen bg-[#1A1A1A] flex flex-col items-center px-6 pt-[max(6rem,env(safe-area-inset-top,0px)+4.5rem)]">
       <img
-        src={logo}
+        src={LOGO_SRC}
         alt="Green Vision Trader"
         className="h-16 w-auto object-contain mb-9"
       />

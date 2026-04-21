@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom';
 import { Bell, Menu } from 'lucide-react';
-import logo from '../assets/logo.png';
+import { LOGO_SRC } from '../constants/branding';
 import { USER } from '../constants';
 import { useNotifications } from '../hooks/useNotifications';
 import { useAuth } from '../context/AuthContext';
@@ -46,7 +46,7 @@ export default function Header({ onMenuClick }) {
             <Menu className="w-6 h-6" strokeWidth={2} />
           </button>
           <img
-            src={logo}
+            src={LOGO_SRC}
             alt=""
             className="h-9 w-auto max-w-[100px] object-contain flex-shrink-0"
           />
